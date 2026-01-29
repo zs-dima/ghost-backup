@@ -5,6 +5,8 @@ set -eu
 umask 077
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"; }
 die() { log "ERROR: $*"; exit 1; }
+SCRIPT_VERSION="2026-01-29"
+log "backup.sh version ${SCRIPT_VERSION}"
 
 file_env() {
   var="$1"
