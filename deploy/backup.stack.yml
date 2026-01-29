@@ -1,0 +1,61 @@
+version: "3.8"
+
+services:
+  swarm-cronjob:
+    image: ${SWARM_CRONJOB_IMAGE:-crazymax/swarm-cronjob:1.15.0}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - TZ=${TZ:-UTC}
+      - LOG_LEVEL=info
+      - LOG_JSON=false
+    deploy:
+      mode: replicated
+      replicas: 1
+      restart_policy:
+        condition: any
+      placement:
+        constraints:
+          - node.role == manager
+
+  mysql-backup:
+    image: ${BACKUP_IMAGE:-backup-mysql:1.0.0}
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      - TZ=${TZ:-UTC}
+      - RESTIC_REPOSITORY=${RESTIC_REPOSITORY}
+      - RESTIC_PASSWORD_FILE=/run/secrets/restic_password
+      - MYSQL_HOST=${MYSQL_HOST}
+      - MYSQL_PORT=${MYSQL_PORT:-3306}
+      - MYSQL_USER=${MYSQL_USER}
+      - MYSQL_DATABASE=${MYSQL_DATABASE}
+      - MYSQL_PASSWORD_FILE=/run/secrets/mysql_password
+      - BACKUP_PATHS=/data
+      - RESTIC_ONE_FILE_SYSTEM=false
+      - RESTIC_TAGS=swarm,backup
+    secrets:
+      - restic_password
+      - mysql_password
+    volumes:
+      - backup-data:/data:ro
+    deploy:
+      mode: replicated
+      replicas: 0
+      labels:
+        - "swarm.cronjob.enable=true"
+        - "swarm.cronjob.schedule=0 2 * * *"
+        - "swarm.cronjob.skip-running=true"
+      restart_policy:
+        condition: none
+
+volumes:
+  backup-data:
+    external: true
+
+secrets:
+  restic_password:
+    external: true
+  mysql_password:
+    external: true

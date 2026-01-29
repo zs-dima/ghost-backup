@@ -1,0 +1,6 @@
+**
+!.dockerignore
+!deploy/
+!deploy/Dockerfile
+!deploy/backup.sh
+!deploy/.dockerignore
