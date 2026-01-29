@@ -30,14 +30,21 @@ file_env RESTIC_PASSWORD
 : "${RESTIC_PASSWORD:?RESTIC_PASSWORD or RESTIC_PASSWORD_FILE is required}"
 
 tmp_base=""
-for d in "${TMPDIR:-}" /tmp /dev/shm /run; do
-  [ -n "$d" ] || continue
-  [ -d "$d" ] || continue
-  if [ -w "$d" ]; then
-    tmp_base="$d"
-    break
+if [ -n "${TMPDIR:-}" ]; then
+  if [ ! -d "${TMPDIR}" ]; then
+    mkdir -p "${TMPDIR}" 2>/dev/null || die "TMPDIR is not usable: ${TMPDIR}"
   fi
-done
+  [ -w "${TMPDIR}" ] || die "TMPDIR is not writable: ${TMPDIR}"
+  tmp_base="${TMPDIR}"
+else
+  for d in /tmp /dev/shm /run; do
+    [ -d "$d" ] || continue
+    if [ -w "$d" ]; then
+      tmp_base="$d"
+      break
+    fi
+  done
+fi
 [ -n "${tmp_base}" ] || die "No writable temp dir found (set TMPDIR or mount /tmp tmpfs)"
 tmpdir="$(mktemp -d -p "${tmp_base}" restic.XXXXXX)" || die "mktemp failed in ${tmp_base}"
 trap 'rm -rf "$tmpdir" >/dev/null 2>&1 || true' EXIT INT TERM

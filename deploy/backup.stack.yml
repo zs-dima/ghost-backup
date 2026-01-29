@@ -21,9 +21,10 @@ services:
     read_only: true
     tmpfs:
       - /tmp:rw,mode=1777
+      - /backup-tmp:rw,mode=1777
     environment:
       - TZ=${TZ:-UTC}
-      - TMPDIR=/tmp
+      - TMPDIR=${TMPDIR:-/backup-tmp}
       - RESTIC_REPOSITORY=${RESTIC_REPOSITORY}
       - RESTIC_PASSWORD_FILE=/run/secrets/restic_password
       - MYSQL_HOST=${MYSQL_HOST}
