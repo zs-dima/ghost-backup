@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+(set -o pipefail) 2>/dev/null && set -o pipefail || true
 
 umask 077
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"; }
@@ -29,30 +30,6 @@ file_env() {
 file_env RESTIC_PASSWORD
 : "${RESTIC_PASSWORD:?RESTIC_PASSWORD or RESTIC_PASSWORD_FILE is required}"
 
-tmp_base=""
-if [ -n "${TMPDIR:-}" ]; then
-  if [ ! -d "${TMPDIR}" ]; then
-    mkdir -p "${TMPDIR}" 2>/dev/null || true
-  fi
-  if [ -w "${TMPDIR}" ]; then
-    tmp_base="${TMPDIR}"
-  else
-    log "TMPDIR not writable (${TMPDIR}); falling back to system temp dirs"
-  fi
-fi
-if [ -z "${tmp_base}" ]; then
-  for d in /tmp /dev/shm /run; do
-    [ -d "$d" ] || continue
-    if [ -w "$d" ]; then
-      tmp_base="$d"
-      break
-    fi
-  done
-fi
-[ -n "${tmp_base}" ] || die "No writable temp dir found (set TMPDIR or mount /tmp tmpfs)"
-tmpdir="$(mktemp -d -p "${tmp_base}" restic.XXXXXX)" || die "mktemp failed in ${tmp_base}"
-trap 'rm -rf "$tmpdir" >/dev/null 2>&1 || true' EXIT INT TERM
-
 # AWS creds can be via AWS_SHARED_CREDENTIALS_FILE (recommended) or env.
 # We don’t force them here because some environments use IAM roles or env injection.
 file_env S3_ACCESS_KEY
@@ -61,16 +38,11 @@ file_env S3_SESSION_TOKEN
 if [ -n "${S3_ACCESS_KEY:-}" ] || [ -n "${S3_SECRET_KEY:-}" ] || [ -n "${S3_SESSION_TOKEN:-}" ]; then
   [ -n "${S3_ACCESS_KEY:-}" ] || die "S3_ACCESS_KEY or S3_ACCESS_KEY_FILE is required when S3_SECRET_KEY is set"
   [ -n "${S3_SECRET_KEY:-}" ] || die "S3_SECRET_KEY or S3_SECRET_KEY_FILE is required when S3_ACCESS_KEY is set"
-  aws_creds_file="${tmpdir}/aws-credentials"
-  cat > "${aws_creds_file}" <<EOF
-[default]
-aws_access_key_id=${S3_ACCESS_KEY}
-aws_secret_access_key=${S3_SECRET_KEY}
-EOF
+  export AWS_ACCESS_KEY_ID="${S3_ACCESS_KEY}"
+  export AWS_SECRET_ACCESS_KEY="${S3_SECRET_KEY}"
   if [ -n "${S3_SESSION_TOKEN:-}" ]; then
-    printf 'aws_session_token=%s\n' "${S3_SESSION_TOKEN}" >> "${aws_creds_file}"
+    export AWS_SESSION_TOKEN="${S3_SESSION_TOKEN}"
   fi
-  export AWS_SHARED_CREDENTIALS_FILE="${aws_creds_file}"
 fi
 
 # --- MySQL config ---
@@ -108,24 +80,10 @@ while :; do
   sleep "${SLEEP_SECONDS}"
 done
 
-STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-DUMP_SQL="${tmpdir}/${MYSQL_DATABASE}-${STAMP}.sql"
-DUMP_GZ="${DUMP_SQL}.gz"
-
 # Safe defaults for InnoDB logical backups; override if needed
 MYSQLDUMP_ARGS="${MYSQLDUMP_ARGS:-"--single-transaction --quick --routines --events --triggers --set-gtid-purged=OFF"}"
 
-log "Dumping database '${MYSQL_DATABASE}'..."
-# Avoid piping to restic stdin to prevent “restic waits forever” failure mode.
-# shellcheck disable=SC2086
-mysqldump ${MYSQL_COMMON_ARGS} ${MYSQLDUMP_ARGS} \
-  --databases "${MYSQL_DATABASE}" \
-  --result-file="${DUMP_SQL}" \
-  >/dev/null 2>&1 || die "mysqldump failed (auth/plugin/permissions?)"
-
-# gzip -n makes output more deterministic (better dedup) and avoids storing timestamps in gzip header
-gzip -n -9 "${DUMP_SQL}" || die "gzip failed"
-log "DB dump ready: ${DUMP_GZ}"
+RESTIC_EXTRA_ARGS="${RESTIC_EXTRA_ARGS:-"--no-cache"}"
 
 # Init repo if needed
 if [ "${SKIP_INIT:-false}" != "true" ]; then
@@ -153,9 +111,32 @@ file_env BACKUP_PATHS true
 RESTIC_HOST="${RESTIC_HOSTNAME:-$(hostname)}"
 BACKUP_PATHS="${BACKUP_PATHS:-}"
 RESTIC_ONE_FILE_SYSTEM="${RESTIC_ONE_FILE_SYSTEM:-false}"
-RESTIC_EXTRA_ARGS="${RESTIC_EXTRA_ARGS:-}"
 
-set -- "${DUMP_GZ}"
+ONE_FS_ARGS=""
+if [ "${RESTIC_ONE_FILE_SYSTEM}" = "true" ]; then
+  ONE_FS_ARGS="--one-file-system"
+fi
+
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+DUMP_NAME="${MYSQL_DATABASE}-${STAMP}.sql.gz"
+
+log "Streaming database '${MYSQL_DATABASE}' to restic..."
+# shellcheck disable=SC2086
+mysqldump ${MYSQL_COMMON_ARGS} ${MYSQLDUMP_ARGS} \
+  --databases "${MYSQL_DATABASE}" \
+  2>/dev/null \
+  | gzip -n -9 \
+  | restic backup \
+    --stdin \
+    --stdin-filename "${DUMP_NAME}" \
+    --host "${RESTIC_HOST}" \
+    ${ONE_FS_ARGS} \
+    ${TAG_ARGS} \
+    ${RESTIC_EXTRA_ARGS} \
+    -- \
+  || die "restic backup (db) failed"
+
+set --
 if [ -n "${BACKUP_PATHS}" ]; then
   BACKUP_PATHS_NORMALIZED="$(printf '%s' "${BACKUP_PATHS}" | tr ',' '\n')"
   oldIFS="$IFS"
@@ -170,19 +151,18 @@ if [ -n "${BACKUP_PATHS}" ]; then
   IFS="$oldIFS"
 fi
 
-ONE_FS_ARGS=""
-if [ "${RESTIC_ONE_FILE_SYSTEM}" = "true" ]; then
-  ONE_FS_ARGS="--one-file-system"
+if [ "$#" -gt 0 ]; then
+  log "Running restic backup for paths (host=${RESTIC_HOST})..."
+  # shellcheck disable=SC2086
+  restic backup \
+    --host "${RESTIC_HOST}" \
+    ${ONE_FS_ARGS} \
+    ${TAG_ARGS} \
+    ${RESTIC_EXTRA_ARGS} \
+    -- "$@"
+else
+  log "No extra backup paths configured."
 fi
-
-log "Running restic backup (host=${RESTIC_HOST})..."
-# shellcheck disable=SC2086
-restic backup \
-  --host "${RESTIC_HOST}" \
-  ${ONE_FS_ARGS} \
-  ${TAG_ARGS} \
-  ${RESTIC_EXTRA_ARGS} \
-  -- "$@"
 
 if [ "${SKIP_FORGET:-false}" != "true" ]; then
   RESTIC_FORGET_ARGS="${RESTIC_FORGET_ARGS:-"--prune --keep-last 7 --keep-daily 7 --keep-weekly 4 --keep-monthly 12 --group-by tags"}"
