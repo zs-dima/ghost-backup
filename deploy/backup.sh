@@ -5,7 +5,7 @@ set -eu
 umask 077
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"; }
 die() { log "ERROR: $*"; exit 1; }
-SCRIPT_VERSION="2026-01-29"
+SCRIPT_VERSION="2026-01-29.2"
 log "backup.sh version ${SCRIPT_VERSION}"
 
 file_env() {
@@ -24,13 +24,24 @@ file_env() {
     fi
   fi
 
-  [ -n "${val:-}" ] && eval export "$var=\$val"
+  if [ -n "${val:-}" ]; then
+    eval export "$var=\$val"
+  fi
 }
 
 # --- Restic config ---
 : "${RESTIC_REPOSITORY:?RESTIC_REPOSITORY is required (e.g. s3:https://HOST/BUCKET/PREFIX)}"
 file_env RESTIC_PASSWORD
 : "${RESTIC_PASSWORD:?RESTIC_PASSWORD or RESTIC_PASSWORD_FILE is required}"
+
+# Temp dir: restic needs writable temp for pack files.
+TMPDIR="${TMPDIR:-/dev/shm}"
+if [ ! -d "${TMPDIR}" ]; then
+  mkdir -p "${TMPDIR}" 2>/dev/null || die "TMPDIR is not usable: ${TMPDIR}"
+fi
+[ -w "${TMPDIR}" ] || die "TMPDIR is not writable: ${TMPDIR}"
+export TMPDIR
+export RESTIC_TMP_DIR="${RESTIC_TMP_DIR:-$TMPDIR}"
 
 # AWS creds can be via AWS_SHARED_CREDENTIALS_FILE (recommended) or env.
 # We don’t force them here because some environments use IAM roles or env injection.
@@ -82,8 +93,14 @@ while :; do
   sleep "${SLEEP_SECONDS}"
 done
 
+# Dump binary (mariadb-dump is preferred in this image)
+MYSQLDUMP_BIN="${MYSQLDUMP_BIN:-/usr/bin/mariadb-dump}"
+if [ ! -x "${MYSQLDUMP_BIN}" ]; then
+  MYSQLDUMP_BIN="/usr/bin/mysqldump"
+fi
+
 # Safe defaults for InnoDB logical backups; override if needed
-MYSQLDUMP_ARGS="${MYSQLDUMP_ARGS:-"--single-transaction --quick --routines --events --triggers --set-gtid-purged=OFF"}"
+MYSQLDUMP_ARGS="${MYSQLDUMP_ARGS:-"--single-transaction --quick --routines --events --triggers"}"
 
 RESTIC_EXTRA_ARGS="${RESTIC_EXTRA_ARGS:-"--no-cache"}"
 
@@ -123,20 +140,37 @@ STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 DUMP_NAME="${MYSQL_DATABASE}-${STAMP}.sql.gz"
 
 log "Streaming database '${MYSQL_DATABASE}' to restic..."
+fifo="${TMPDIR}/mysqldump-${$}.fifo"
+cleanup_fifo() { rm -f "${fifo}" >/dev/null 2>&1 || true; }
+cleanup_fifo
+mkfifo "${fifo}" || die "mkfifo failed in ${TMPDIR}"
+trap 'cleanup_fifo' EXIT INT TERM
+
 # shellcheck disable=SC2086
-mysqldump ${MYSQL_COMMON_ARGS} ${MYSQLDUMP_ARGS} \
+${MYSQLDUMP_BIN} ${MYSQL_COMMON_ARGS} ${MYSQLDUMP_ARGS} \
   --databases "${MYSQL_DATABASE}" \
-  2>/dev/null \
-  | gzip -n -9 \
-  | restic backup \
-    --stdin \
-    --stdin-filename "${DUMP_NAME}" \
-    --host "${RESTIC_HOST}" \
-    ${ONE_FS_ARGS} \
-    ${TAG_ARGS} \
-    ${RESTIC_EXTRA_ARGS} \
-    -- \
-  || die "restic backup (db) failed"
+  >"${fifo}" &
+dump_pid=$!
+
+gzip -n -9 < "${fifo}" | restic backup \
+  --stdin \
+  --stdin-filename "${DUMP_NAME}" \
+  --host "${RESTIC_HOST}" \
+  ${ONE_FS_ARGS} \
+  ${TAG_ARGS} \
+  ${RESTIC_EXTRA_ARGS} \
+  -- \
+  || restic_status=$?
+restic_status="${restic_status:-0}"
+
+wait "${dump_pid}"
+dump_status=$?
+
+cleanup_fifo
+trap - EXIT INT TERM
+
+[ "${dump_status}" -eq 0 ] || die "mysqldump failed (exit ${dump_status})"
+[ "${restic_status}" -eq 0 ] || die "restic backup (db) failed (exit ${restic_status})"
 
 set --
 if [ -n "${BACKUP_PATHS}" ]; then
