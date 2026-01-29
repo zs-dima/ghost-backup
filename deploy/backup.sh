@@ -5,17 +5,35 @@ set -eu
 umask 077
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"; }
 die() { log "ERROR: $*"; exit 1; }
-SCRIPT_VERSION="2026-01-29.2"
+SCRIPT_VERSION="2026-01-29.4"
 log "backup.sh version ${SCRIPT_VERSION}"
 
 file_env() {
   var="$1"
   file_var="${var}_FILE"
   preserve_newlines="${2:-false}"
-  eval val=\${$var:-}
-  eval file=\${$file_var:-}
+  val=""
+  file=""
 
-  if [ -n "${file:-}" ]; then
+  case "$var" in
+    RESTIC_PASSWORD) val="${RESTIC_PASSWORD:-}" ;;
+    S3_ACCESS_KEY) val="${S3_ACCESS_KEY:-}" ;;
+    S3_SECRET_KEY) val="${S3_SECRET_KEY:-}" ;;
+    S3_SESSION_TOKEN) val="${S3_SESSION_TOKEN:-}" ;;
+    MYSQL_PASSWORD) val="${MYSQL_PASSWORD:-}" ;;
+    BACKUP_PATHS) val="${BACKUP_PATHS:-}" ;;
+  esac
+
+  case "$file_var" in
+    RESTIC_PASSWORD_FILE) file="${RESTIC_PASSWORD_FILE:-}" ;;
+    S3_ACCESS_KEY_FILE) file="${S3_ACCESS_KEY_FILE:-}" ;;
+    S3_SECRET_KEY_FILE) file="${S3_SECRET_KEY_FILE:-}" ;;
+    S3_SESSION_TOKEN_FILE) file="${S3_SESSION_TOKEN_FILE:-}" ;;
+    MYSQL_PASSWORD_FILE) file="${MYSQL_PASSWORD_FILE:-}" ;;
+    BACKUP_PATHS_FILE) file="${BACKUP_PATHS_FILE:-}" ;;
+  esac
+
+  if [ -n "${file}" ]; then
     [ -f "$file" ] || die "$file_var points to missing file: $file"
     if [ "${preserve_newlines}" = "true" ]; then
       val="$(cat "$file")"
@@ -24,8 +42,8 @@ file_env() {
     fi
   fi
 
-  if [ -n "${val:-}" ]; then
-    eval export "$var=\$val"
+  if [ -n "${val}" ]; then
+    export "$var=$val"
   fi
 }
 
@@ -35,7 +53,7 @@ file_env RESTIC_PASSWORD
 : "${RESTIC_PASSWORD:?RESTIC_PASSWORD or RESTIC_PASSWORD_FILE is required}"
 
 # Temp dir: restic needs writable temp for pack files.
-TMPDIR="${TMPDIR:-/dev/shm}"
+TMPDIR="${TMPDIR:-/tmp}"
 if [ ! -d "${TMPDIR}" ]; then
   mkdir -p "${TMPDIR}" 2>/dev/null || die "TMPDIR is not usable: ${TMPDIR}"
 fi
