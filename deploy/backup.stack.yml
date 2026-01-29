@@ -20,9 +20,10 @@ services:
     image: ${BACKUP_IMAGE:-backup-mysql:1.0.0}
     read_only: true
     tmpfs:
-      - /tmp
+      - /tmp:rw,mode=1777
     environment:
       - TZ=${TZ:-UTC}
+      - TMPDIR=/tmp
       - RESTIC_REPOSITORY=${RESTIC_REPOSITORY}
       - RESTIC_PASSWORD_FILE=/run/secrets/restic_password
       - MYSQL_HOST=${MYSQL_HOST}

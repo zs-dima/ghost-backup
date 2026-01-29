@@ -29,7 +29,17 @@ file_env() {
 file_env RESTIC_PASSWORD
 : "${RESTIC_PASSWORD:?RESTIC_PASSWORD or RESTIC_PASSWORD_FILE is required}"
 
-tmpdir="$(mktemp -d)"
+tmp_base=""
+for d in "${TMPDIR:-}" /tmp /dev/shm /run; do
+  [ -n "$d" ] || continue
+  [ -d "$d" ] || continue
+  if [ -w "$d" ]; then
+    tmp_base="$d"
+    break
+  fi
+done
+[ -n "${tmp_base}" ] || die "No writable temp dir found (set TMPDIR or mount /tmp tmpfs)"
+tmpdir="$(mktemp -d -p "${tmp_base}" restic.XXXXXX)" || die "mktemp failed in ${tmp_base}"
 trap 'rm -rf "$tmpdir" >/dev/null 2>&1 || true' EXIT INT TERM
 
 # AWS creds can be via AWS_SHARED_CREDENTIALS_FILE (recommended) or env.
