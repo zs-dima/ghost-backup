@@ -99,8 +99,9 @@ if [ ! -x "${MYSQLDUMP_BIN}" ]; then
   MYSQLDUMP_BIN="/usr/bin/mysqldump"
 fi
 
-# Safe defaults for InnoDB logical backups; override if needed
-MYSQLDUMP_ARGS="${MYSQLDUMP_ARGS:-"--single-transaction --quick --routines --events --triggers"}"
+# Safe defaults for logical backups; override if needed
+# --no-tablespaces avoids PROCESS privilege requirement in MySQL 8 / MariaDB.
+MYSQLDUMP_ARGS="${MYSQLDUMP_ARGS:-"--single-transaction --quick --routines --events --triggers --no-tablespaces"}"
 
 RESTIC_EXTRA_ARGS="${RESTIC_EXTRA_ARGS:-"--no-cache"}"
 
