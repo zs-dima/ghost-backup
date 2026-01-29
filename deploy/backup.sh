@@ -32,11 +32,15 @@ file_env RESTIC_PASSWORD
 tmp_base=""
 if [ -n "${TMPDIR:-}" ]; then
   if [ ! -d "${TMPDIR}" ]; then
-    mkdir -p "${TMPDIR}" 2>/dev/null || die "TMPDIR is not usable: ${TMPDIR}"
+    mkdir -p "${TMPDIR}" 2>/dev/null || true
   fi
-  [ -w "${TMPDIR}" ] || die "TMPDIR is not writable: ${TMPDIR}"
-  tmp_base="${TMPDIR}"
-else
+  if [ -w "${TMPDIR}" ]; then
+    tmp_base="${TMPDIR}"
+  else
+    log "TMPDIR not writable (${TMPDIR}); falling back to system temp dirs"
+  fi
+fi
+if [ -z "${tmp_base}" ]; then
   for d in /tmp /dev/shm /run; do
     [ -d "$d" ] || continue
     if [ -w "$d" ]; then
