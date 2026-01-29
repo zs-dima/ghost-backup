@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   swarm-cronjob:
     image: ${SWARM_CRONJOB_IMAGE:-crazymax/swarm-cronjob:1.15.0}
@@ -32,6 +30,9 @@ services:
       - MYSQL_USER=${MYSQL_USER}
       - MYSQL_DATABASE=${MYSQL_DATABASE}
       - MYSQL_PASSWORD_FILE=/run/secrets/mysql_password
+      - S3_ACCESS_KEY_FILE=${S3_ACCESS_KEY_FILE}
+      - S3_SECRET_KEY_FILE=${S3_SECRET_KEY_FILE}
+      - S3_SESSION_TOKEN_FILE=${S3_SESSION_TOKEN_FILE}
       - BACKUP_PATHS=/data
       - RESTIC_ONE_FILE_SYSTEM=false
       - RESTIC_TAGS=swarm,backup

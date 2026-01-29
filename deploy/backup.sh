@@ -29,8 +29,28 @@ file_env() {
 file_env RESTIC_PASSWORD
 : "${RESTIC_PASSWORD:?RESTIC_PASSWORD or RESTIC_PASSWORD_FILE is required}"
 
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir" >/dev/null 2>&1 || true' EXIT INT TERM
+
 # AWS creds can be via AWS_SHARED_CREDENTIALS_FILE (recommended) or env.
 # We don’t force them here because some environments use IAM roles or env injection.
+file_env S3_ACCESS_KEY
+file_env S3_SECRET_KEY
+file_env S3_SESSION_TOKEN
+if [ -n "${S3_ACCESS_KEY:-}" ] || [ -n "${S3_SECRET_KEY:-}" ] || [ -n "${S3_SESSION_TOKEN:-}" ]; then
+  [ -n "${S3_ACCESS_KEY:-}" ] || die "S3_ACCESS_KEY or S3_ACCESS_KEY_FILE is required when S3_SECRET_KEY is set"
+  [ -n "${S3_SECRET_KEY:-}" ] || die "S3_SECRET_KEY or S3_SECRET_KEY_FILE is required when S3_ACCESS_KEY is set"
+  aws_creds_file="${tmpdir}/aws-credentials"
+  cat > "${aws_creds_file}" <<EOF
+[default]
+aws_access_key_id=${S3_ACCESS_KEY}
+aws_secret_access_key=${S3_SECRET_KEY}
+EOF
+  if [ -n "${S3_SESSION_TOKEN:-}" ]; then
+    printf 'aws_session_token=%s\n' "${S3_SESSION_TOKEN}" >> "${aws_creds_file}"
+  fi
+  export AWS_SHARED_CREDENTIALS_FILE="${aws_creds_file}"
+fi
 
 # --- MySQL config ---
 : "${MYSQL_HOST:?MYSQL_HOST is required}"
@@ -66,9 +86,6 @@ while :; do
   [ "$i" -ge "$tries" ] && die "MySQL not ready after ${WAIT_SECONDS}s"
   sleep "${SLEEP_SECONDS}"
 done
-
-tmpdir="$(mktemp -d)"
-trap 'rm -rf "$tmpdir" >/dev/null 2>&1 || true' EXIT INT TERM
 
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 DUMP_SQL="${tmpdir}/${MYSQL_DATABASE}-${STAMP}.sql"
