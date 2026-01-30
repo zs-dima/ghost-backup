@@ -25,39 +25,29 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
-      dockerhub_enabled: ${{ steps.dockerhub.outputs.enabled }}
       images: ${{ steps.meta-inputs.outputs.images }}
       tags: ${{ steps.tags-final.outputs.tags }}
       labels: ${{ steps.meta.outputs.labels }}
     steps:
-      - name: Detect DockerHub publish
-        id: dockerhub
+      - name: Verify DockerHub credentials
         shell: bash
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
           set -euo pipefail
-          if [ -n "${DOCKERHUB_USERNAME:-}" ] && [ -n "${DOCKERHUB_TOKEN:-}" ]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          elif [ -z "${DOCKERHUB_USERNAME:-}" ] && [ -z "${DOCKERHUB_TOKEN:-}" ]; then
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "::error::Set both DOCKERHUB_USERNAME and DOCKERHUB_TOKEN, or neither to disable DockerHub publish."
+          if [ -z "${DOCKERHUB_USERNAME:-}" ] || [ -z "${DOCKERHUB_TOKEN:-}" ]; then
+            echo "::error::DOCKERHUB_USERNAME and DOCKERHUB_TOKEN are required."
             exit 1
           fi
 
       - name: Prepare image list
         id: meta-inputs
         shell: bash
-        env:
-          DOCKERHUB_ENABLED: ${{ steps.dockerhub.outputs.enabled }}
         run: |
           set -euo pipefail
           images="${REGISTRY}/${IMAGE_NAME}"
-          if [ "${DOCKERHUB_ENABLED}" = "true" ]; then
-            images="${images}"$'\n'"${DOCKERHUB_REGISTRY}/${DOCKERHUB_IMAGE}"
-          fi
+          images="${images}"$'\n'"${DOCKERHUB_REGISTRY}/${DOCKERHUB_IMAGE}"
           {
             echo "images<<EOF"
             echo "$images"
@@ -162,7 +152,6 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log in to DockerHub
-        if: needs.prepare.outputs.dockerhub_enabled == 'true'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.DOCKERHUB_REGISTRY }}
@@ -179,9 +168,7 @@ jobs:
           images="${{ needs.prepare.outputs.images }}"
           if [ -z "$images" ]; then
             images="${REGISTRY}/${IMAGE_NAME}"
-            if [ "${{ needs.prepare.outputs.dockerhub_enabled }}" = "true" ]; then
-              images="${images}"$'\n'"${DOCKERHUB_REGISTRY}/${DOCKERHUB_IMAGE}"
-            fi
+            images="${images}"$'\n'"${DOCKERHUB_REGISTRY}/${DOCKERHUB_IMAGE}"
           fi
           declare -A seen
           base_tags=""
@@ -282,7 +269,6 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log in to DockerHub
-        if: needs.prepare.outputs.dockerhub_enabled == 'true'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.DOCKERHUB_REGISTRY }}
@@ -295,6 +281,10 @@ jobs:
           set -euo pipefail
           tags="${{ needs.prepare.outputs.tags }}"
           images="${{ needs.prepare.outputs.images }}"
+          if [ -z "$images" ]; then
+            images="${REGISTRY}/${IMAGE_NAME}"
+            images="${images}"$'\n'"${DOCKERHUB_REGISTRY}/${DOCKERHUB_IMAGE}"
+          fi
           declare -A seen
           final_tags=""
           add_tag() {
