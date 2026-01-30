@@ -142,9 +142,15 @@ fi
 MYSQL_CLIENT_EXTRA_ARGS="${MYSQL_CLIENT_EXTRA_ARGS:-}"
 
 require_cmd restic
-require_cmd mysqladmin
 require_cmd gzip
 require_cmd mkfifo
+
+# Prefer mariadb-admin for modern MariaDB clients.
+MYSQLADMIN_BIN="${MYSQLADMIN_BIN:-}"
+if [ -z "${MYSQLADMIN_BIN}" ]; then
+  MYSQLADMIN_BIN="$(command -v mariadb-admin 2>/dev/null || true)"
+fi
+[ -n "${MYSQLADMIN_BIN}" ] && [ -x "${MYSQLADMIN_BIN}" ] || die "mariadb-admin binary not found (set MYSQLADMIN_BIN to an absolute path)"
 
 build_user_tag_list() {
   RESTIC_USER_TAG_LIST=""
@@ -273,9 +279,9 @@ mysqladmin_ping() {
   fi
 
   if [ -n "${MYSQL_PASSWORD_VALUE}" ]; then
-    MYSQL_PWD="${MYSQL_PASSWORD_VALUE}" mysqladmin "$@" ping --silent >/dev/null 2>&1
+    MYSQL_PWD="${MYSQL_PASSWORD_VALUE}" "${MYSQLADMIN_BIN}" "$@" ping --silent >/dev/null 2>&1
   else
-    mysqladmin "$@" ping --silent >/dev/null 2>&1
+    "${MYSQLADMIN_BIN}" "$@" ping --silent >/dev/null 2>&1
   fi
 }
 

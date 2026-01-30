@@ -42,7 +42,7 @@ Use `*_FILE` for secrets. Supported: `RESTIC_PASSWORD`, `MYSQL_PASSWORD`, `S3_AC
 | `MYSQL_WAIT_SECONDS` | no | `60` | Max time to wait for MySQL. |
 | `MYSQL_WAIT_INTERVAL_SECONDS` | no | `5` | Wait interval between pings. |
 | `MYSQL_PLUGIN_DIR` | no | `/usr/lib/mariadb/plugin` | MySQL auth plugin dir. |
-| `MYSQL_CLIENT_EXTRA_ARGS` | no | — | Extra args for `mysqladmin`/client. |
+| `MYSQL_CLIENT_EXTRA_ARGS` | no | — | Extra args for `mariadb-admin`/client. |
 | `MYSQLDUMP_BIN` | no | auto | Path to `mariadb-dump`/`mysqldump`. |
 | `MYSQLDUMP_ARGS` | no | safe defaults | Extra args for dump command. |
 | `TMPDIR` | no | `/tmp` | Temp dir for FIFO and restic. |

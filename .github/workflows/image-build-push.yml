@@ -126,25 +126,37 @@ jobs:
           suffix="-${{ matrix.arch }}-staging-${GITHUB_RUN_ID}"
           tags="${{ needs.prepare.outputs.tags }}"
           images="${{ needs.prepare.outputs.images }}"
+          if [ -z "$images" ]; then
+            images="${REGISTRY}/${IMAGE_NAME}"
+            if [ "${{ needs.prepare.outputs.dockerhub_enabled }}" = "true" ]; then
+              images="${images}"$'\n'"${DOCKERHUB_REGISTRY}/${DOCKERHUB_IMAGE}"
+            fi
+          fi
           has_tag="false"
           while IFS= read -r tag; do
             [ -z "$tag" ] && continue
             has_tag="true"
             break
           done <<< "$tags"
+          out_tags=""
+          if [ "$has_tag" = "true" ]; then
+            while IFS= read -r tag; do
+              [ -z "$tag" ] && continue
+              out_tags+="${tag}${suffix}"$'\n'
+            done <<< "$tags"
+          else
+            while IFS= read -r image; do
+              [ -z "$image" ] && continue
+              out_tags+="${image}:sha-${GITHUB_SHA}${suffix}"$'\n'
+            done <<< "$images"
+          fi
+          if [ -z "$out_tags" ]; then
+            echo "::error::No image tags produced; check docker/metadata-action outputs."
+            exit 1
+          fi
           {
             echo "tags<<EOF"
-            if [ "$has_tag" = "true" ]; then
-              while IFS= read -r tag; do
-                [ -z "$tag" ] && continue
-                echo "${tag}${suffix}"
-              done <<< "$tags"
-            else
-              while IFS= read -r image; do
-                [ -z "$image" ] && continue
-                echo "${image}:sha-${GITHUB_SHA}${suffix}"
-              done <<< "$images"
-            fi
+            printf '%s' "$out_tags"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
@@ -185,7 +197,7 @@ jobs:
             set -e
             test -x /usr/local/bin/backup
             restic version >/dev/null
-            mysqladmin --version >/dev/null
+            mariadb-admin --version >/dev/null
             if [ -x /usr/bin/mariadb-dump ]; then
               /usr/bin/mariadb-dump --version >/dev/null
             else

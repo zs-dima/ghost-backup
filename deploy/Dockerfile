@@ -50,7 +50,7 @@ RUN set -eux; \
     targets="\
     /usr/local/bin/restic \
     /usr/local/bin/backup \
-    /usr/bin/mysqladmin \
+    /usr/bin/mariadb-admin \
     /usr/bin/mariadb-dump \
     /bin/gzip \
     /bin/busybox \
@@ -71,7 +71,7 @@ RUN set -eux; \
     chmod 0755 \
     /out/usr/local/bin/restic \
     /out/usr/local/bin/backup \
-    /out/usr/bin/mysqladmin \
+    /out/usr/bin/mariadb-admin \
     /out/usr/bin/mariadb-dump \
     /out/bin/gzip \
     /out/bin/busybox; \
