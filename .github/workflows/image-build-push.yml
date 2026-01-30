@@ -183,24 +183,31 @@ jobs:
               images="${images}"$'\n'"${DOCKERHUB_REGISTRY}/${DOCKERHUB_IMAGE}"
             fi
           fi
-          has_tag="false"
+          declare -A seen
+          base_tags=""
+          add_base() {
+            local t="$1"
+            if [ -n "$t" ] && [ -z "${seen[$t]:-}" ]; then
+              base_tags+="${t}"$'\n'
+              seen["$t"]=1
+            fi
+          }
           while IFS= read -r tag; do
-            [ -z "$tag" ] && continue
-            has_tag="true"
-            break
+            add_base "$tag"
           done <<< "$tags"
-          out_tags=""
-          if [ "$has_tag" = "true" ]; then
-            while IFS= read -r tag; do
-              [ -z "$tag" ] && continue
-              out_tags+="${tag}${suffix}"$'\n'
-            done <<< "$tags"
-          else
-            while IFS= read -r image; do
-              [ -z "$image" ] && continue
-              out_tags+="${image}:sha-${GITHUB_SHA}${suffix}"$'\n'
-            done <<< "$images"
+          while IFS= read -r image; do
+            [ -z "$image" ] && continue
+            add_base "${image}:latest"
+          done <<< "$images"
+          if [ -z "$base_tags" ]; then
+            echo "::error::No base tags produced; check prepare outputs."
+            exit 1
           fi
+          out_tags=""
+          while IFS= read -r base; do
+            [ -z "$base" ] && continue
+            out_tags+="${base}${suffix}"$'\n'
+          done <<< "$base_tags"
           if [ -z "$out_tags" ]; then
             echo "::error::No image tags produced; check docker/metadata-action outputs."
             exit 1
@@ -287,9 +294,30 @@ jobs:
         run: |
           set -euo pipefail
           tags="${{ needs.prepare.outputs.tags }}"
+          images="${{ needs.prepare.outputs.images }}"
+          declare -A seen
+          final_tags=""
+          add_tag() {
+            local t="$1"
+            if [ -n "$t" ] && [ -z "${seen[$t]:-}" ]; then
+              final_tags+="${t}"$'\n'
+              seen["$t"]=1
+            fi
+          }
+          while IFS= read -r tag; do
+            add_tag "$tag"
+          done <<< "$tags"
+          while IFS= read -r image; do
+            [ -z "$image" ] && continue
+            add_tag "${image}:latest"
+          done <<< "$images"
+          if [ -z "$final_tags" ]; then
+            echo "::error::No manifest tags produced; check prepare outputs."
+            exit 1
+          fi
           while IFS= read -r tag; do
             [ -z "$tag" ] && continue
             docker buildx imagetools create -t "$tag" \
               "$tag-amd64-staging-${GITHUB_RUN_ID}" \
               "$tag-arm64-staging-${GITHUB_RUN_ID}"
-          done <<< "$tags"
+          done <<< "$final_tags"
