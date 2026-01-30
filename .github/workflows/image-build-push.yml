@@ -6,13 +6,10 @@ on:
     tags: ["v*.*.*"]
   workflow_dispatch:
 
-permissions:
-  contents: read
-  id-token: write
-  packages: write
+permissions: {}
 
 concurrency:
-  group: ghcr-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -22,7 +19,69 @@ env:
   DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE || 'zsdima/ghost-backup' }}
 
 jobs:
+  prepare:
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      dockerhub_enabled: ${{ steps.dockerhub.outputs.enabled }}
+      images: ${{ steps.meta-inputs.outputs.images }}
+      tags: ${{ steps.meta.outputs.tags }}
+      labels: ${{ steps.meta.outputs.labels }}
+    steps:
+      - name: Detect DockerHub publish
+        id: dockerhub
+        shell: bash
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${DOCKERHUB_USERNAME:-}" ] && [ -n "${DOCKERHUB_TOKEN:-}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          elif [ -z "${DOCKERHUB_USERNAME:-}" ] && [ -z "${DOCKERHUB_TOKEN:-}" ]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Set both DOCKERHUB_USERNAME and DOCKERHUB_TOKEN, or neither to disable DockerHub publish."
+            exit 1
+          fi
+
+      - name: Prepare image list
+        id: meta-inputs
+        shell: bash
+        env:
+          DOCKERHUB_ENABLED: ${{ steps.dockerhub.outputs.enabled }}
+        run: |
+          set -euo pipefail
+          images="${REGISTRY}/${IMAGE_NAME}"
+          if [ "${DOCKERHUB_ENABLED}" = "true" ]; then
+            images="${images}"$'\n'"${DOCKERHUB_REGISTRY}/${DOCKERHUB_IMAGE}"
+          fi
+          {
+            echo "images<<EOF"
+            echo "$images"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.meta-inputs.outputs.images }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=ref,event=tag
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
+
   build:
+    permissions:
+      actions: write
+      contents: read
+      packages: write
     strategy:
       matrix:
         include:
@@ -33,22 +92,13 @@ jobs:
             runner: ubuntu-24.04-arm
             platform: linux/arm64
     runs-on: ${{ matrix.runner }}
+    needs: prepare
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Validate DockerHub settings
-        shell: bash
-        env:
-          DOCKERHUB_IMAGE: ${{ env.DOCKERHUB_IMAGE }}
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -z "$DOCKERHUB_USERNAME" ] || [ -z "$DOCKERHUB_TOKEN" ]; then
-            echo "::error::Set DOCKERHUB_USERNAME and DOCKERHUB_TOKEN secrets. DOCKERHUB_IMAGE is optional (defaults to zsdima/ghost-backup)."
-            exit 1
-          fi
+        with:
+          persist-credentials: false
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -61,30 +111,30 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log in to DockerHub
+        if: needs.prepare.outputs.dockerhub_enabled == 'true'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.DOCKERHUB_REGISTRY }}
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-            ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE }}
-          flavor: |
-            suffix=-${{ matrix.arch }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=ref,event=tag
-            type=sha
-            type=raw,value=latest,enable={{is_default_branch}}
+      - name: Prepare staging tags
+        id: staging-tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          suffix="-${{ matrix.arch }}-staging-${GITHUB_RUN_ID}"
+          tags="${{ needs.prepare.outputs.tags }}"
+          {
+            echo "tags<<EOF"
+            while IFS= read -r tag; do
+              [ -z "$tag" ] && continue
+              echo "${tag}${suffix}"
+            done <<< "$tags"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Build and push (${{ matrix.arch }})
+      - name: Build and push staging image (${{ matrix.arch }})
         uses: docker/build-push-action@v6
         with:
           context: ./deploy
@@ -94,14 +144,48 @@ jobs:
           push: true
           sbom: true
           provenance: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.staging-tags.outputs.tags }}
+          labels: ${{ needs.prepare.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
 
+      - name: Select smoke tag
+        id: smoke-tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          tags="${{ steps.staging-tags.outputs.tags }}"
+          while IFS= read -r tag; do
+            [ -z "$tag" ] && continue
+            echo "image=$tag" >> "$GITHUB_OUTPUT"
+            break
+          done <<< "$tags"
+
+      - name: Smoke test image (${{ matrix.arch }})
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="${{ steps.smoke-tag.outputs.image }}"
+          docker pull "$image"
+          docker run --rm --entrypoint /bin/sh "$image" -c '
+            set -e
+            test -x /usr/local/bin/backup
+            restic version >/dev/null
+            mysqladmin --version >/dev/null
+            if [ -x /usr/bin/mariadb-dump ]; then
+              /usr/bin/mariadb-dump --version >/dev/null
+            else
+              /usr/bin/mysqldump --version >/dev/null
+            fi
+            gzip --version >/dev/null
+          '
+
   manifest:
+    permissions:
+      packages: write
     runs-on: ubuntu-24.04
-    needs: build
+    needs: [prepare, build]
+    timeout-minutes: 10
     steps:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -114,35 +198,21 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log in to DockerHub
+        if: needs.prepare.outputs.dockerhub_enabled == 'true'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.DOCKERHUB_REGISTRY }}
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-            ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=ref,event=tag
-            type=sha
-            type=raw,value=latest,enable={{is_default_branch}}
-
       - name: Create multi-arch manifest
         shell: bash
         run: |
           set -euo pipefail
-          tags="${{ steps.meta.outputs.tags }}"
+          tags="${{ needs.prepare.outputs.tags }}"
           while IFS= read -r tag; do
             [ -z "$tag" ] && continue
             docker buildx imagetools create -t "$tag" \
-              "$tag-amd64" \
-              "$tag-arm64"
+              "$tag-amd64-staging-${GITHUB_RUN_ID}" \
+              "$tag-arm64-staging-${GITHUB_RUN_ID}"
           done <<< "$tags"

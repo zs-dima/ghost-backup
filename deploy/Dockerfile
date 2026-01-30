@@ -51,7 +51,7 @@ RUN set -eux; \
     /usr/local/bin/restic \
     /usr/local/bin/backup \
     /usr/bin/mysqladmin \
-    /usr/bin/mysqldump \
+    /usr/bin/mariadb-dump \
     /bin/gzip \
     /bin/busybox \
     /usr/lib/mariadb/plugin/caching_sha2_password.so \
@@ -72,7 +72,7 @@ RUN set -eux; \
     /out/usr/local/bin/restic \
     /out/usr/local/bin/backup \
     /out/usr/bin/mysqladmin \
-    /out/usr/bin/mysqldump \
+    /out/usr/bin/mariadb-dump \
     /out/bin/gzip \
     /out/bin/busybox; \
     \

@@ -11,66 +11,78 @@ else
   die "This script requires /bin/sh with pipefail support"
 fi
 
+# Newline-only IFS helper.
+NL="$(printf '\nX')"
+NL="${NL%X}"
+
 require_cmd() {
-  cmd="$1"
-  command -v "$cmd" >/dev/null 2>&1 || die "Required command not found: $cmd"
+  req_cmd="$1"
+  command -v "$req_cmd" >/dev/null 2>&1 || die "Required command not found: $req_cmd"
 }
 
-SCRIPT_VERSION="2026-01-29.4"
+is_positive_int() {
+  int_value="$1"
+  case "$int_value" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$int_value" -gt 0 ] 2>/dev/null
+}
+
+SCRIPT_VERSION="2026-01-29.5"
 log "backup.sh version ${SCRIPT_VERSION}"
 
 file_env() {
-  var="$1"
-  file_var="${var}_FILE"
-  preserve_newlines="${2:-false}"
-  val=""
-  file=""
+  fe_var="$1"
+  fe_file_var="${fe_var}_FILE"
+  fe_preserve_newlines="${2:-false}"
+  fe_val=""
+  fe_file=""
 
-  case "$var" in
+  case "$fe_var" in
     RESTIC_PASSWORD)
-      val="${RESTIC_PASSWORD:-}"
-      file="${RESTIC_PASSWORD_FILE:-}"
+      fe_val="${RESTIC_PASSWORD:-}"
+      fe_file="${RESTIC_PASSWORD_FILE:-}"
       ;;
     S3_ACCESS_KEY)
-      val="${S3_ACCESS_KEY:-}"
-      file="${S3_ACCESS_KEY_FILE:-}"
+      fe_val="${S3_ACCESS_KEY:-}"
+      fe_file="${S3_ACCESS_KEY_FILE:-}"
       ;;
     S3_SECRET_KEY)
-      val="${S3_SECRET_KEY:-}"
-      file="${S3_SECRET_KEY_FILE:-}"
+      fe_val="${S3_SECRET_KEY:-}"
+      fe_file="${S3_SECRET_KEY_FILE:-}"
       ;;
     S3_SESSION_TOKEN)
-      val="${S3_SESSION_TOKEN:-}"
-      file="${S3_SESSION_TOKEN_FILE:-}"
+      fe_val="${S3_SESSION_TOKEN:-}"
+      fe_file="${S3_SESSION_TOKEN_FILE:-}"
       ;;
     MYSQL_PASSWORD)
-      val="${MYSQL_PASSWORD:-}"
-      file="${MYSQL_PASSWORD_FILE:-}"
+      fe_val="${MYSQL_PASSWORD:-}"
+      fe_file="${MYSQL_PASSWORD_FILE:-}"
       ;;
     BACKUP_PATHS)
-      val="${BACKUP_PATHS:-}"
-      file="${BACKUP_PATHS_FILE:-}"
+      fe_val="${BACKUP_PATHS:-}"
+      fe_file="${BACKUP_PATHS_FILE:-}"
       ;;
     *)
-      die "file_env: unsupported variable '${var}'"
+      die "file_env: unsupported variable '${fe_var}'"
       ;;
   esac
 
-  if [ -n "${val}" ] && [ -n "${file}" ]; then
-    die "${var} and ${file_var} are both set (use only one)"
+  if [ -n "${fe_val}" ] && [ -n "${fe_file}" ]; then
+    die "${fe_var} and ${fe_file_var} are both set (use only one)"
   fi
 
-  if [ -n "${file}" ]; then
-    [ -f "$file" ] || die "$file_var points to missing file: $file"
-    if [ "${preserve_newlines}" = "true" ]; then
-      val="$(cat "$file")"
+  if [ -n "${fe_file}" ]; then
+    [ -f "$fe_file" ] || die "$fe_file_var points to missing file: $fe_file"
+    if [ "${fe_preserve_newlines}" = "true" ]; then
+      fe_val="$(cat "$fe_file")"
     else
-      val="$(tr -d '\r\n' < "$file")"
+      fe_val="$(tr -d '\r\n' < "$fe_file")"
     fi
   fi
 
-  if [ -n "${val}" ]; then
-    export "$var=$val"
+  if [ -n "${fe_val}" ]; then
+    export "${fe_var}=${fe_val}"
   fi
 }
 
@@ -86,7 +98,6 @@ if [ ! -d "${TMPDIR}" ]; then
 fi
 [ -w "${TMPDIR}" ] || die "TMPDIR is not writable: ${TMPDIR}"
 export TMPDIR
-export RESTIC_TMP_DIR="${RESTIC_TMP_DIR:-$TMPDIR}"
 
 # AWS creds can be via AWS_SHARED_CREDENTIALS_FILE (recommended) or env.
 # We don’t force them here because some environments use IAM roles or env injection.
@@ -110,8 +121,9 @@ fi
 MYSQL_PORT="${MYSQL_PORT:-3306}"
 
 file_env MYSQL_PASSWORD
+MYSQL_PASSWORD_VALUE=""
 if [ -n "${MYSQL_PASSWORD:-}" ]; then
-  export MYSQL_PWD="${MYSQL_PASSWORD}"
+  MYSQL_PASSWORD_VALUE="${MYSQL_PASSWORD}"
   unset MYSQL_PASSWORD
 fi
 
@@ -129,26 +141,183 @@ if [ -n "${MYSQL_PLUGIN_DIR}" ]; then
 fi
 MYSQL_CLIENT_EXTRA_ARGS="${MYSQL_CLIENT_EXTRA_ARGS:-}"
 
-MYSQL_COMMON_ARGS="--protocol=tcp -h ${MYSQL_HOST} -P ${MYSQL_PORT} -u ${MYSQL_USER} ${MYSQL_PLUGIN_ARG} ${MYSQL_CLIENT_EXTRA_ARGS}"
-
 require_cmd restic
 require_cmd mysqladmin
 require_cmd gzip
 require_cmd mkfifo
-if [ -z "${RESTIC_HOSTNAME:-}" ]; then
-  require_cmd hostname
-fi
+
+build_user_tag_list() {
+  RESTIC_USER_TAG_LIST=""
+  if [ -z "${RESTIC_TAGS:-}" ]; then
+    return 0
+  fi
+
+  tag_seen="$NL"
+  oldIFS=$IFS
+  IFS=','
+  set -f
+  # shellcheck disable=SC2086
+  set -- ${RESTIC_TAGS}
+  set +f
+  IFS=$oldIFS
+
+  for t in "$@"; do
+    tag_trimmed="$(printf '%s\n' "$t" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    [ -n "$tag_trimmed" ] || continue
+    case "$tag_seen" in
+      *"$NL$tag_trimmed$NL"*) ;;
+      *)
+        tag_seen="${tag_seen}${tag_trimmed}${NL}"
+        if [ -n "$RESTIC_USER_TAG_LIST" ]; then
+          RESTIC_USER_TAG_LIST="${RESTIC_USER_TAG_LIST}${NL}${tag_trimmed}"
+        else
+          RESTIC_USER_TAG_LIST="$tag_trimmed"
+        fi
+        ;;
+    esac
+  done
+}
+
+restic_backup_stdin() {
+  set -- --stdin --stdin-filename "${DUMP_NAME}" --host "${RESTIC_HOST}"
+
+  if [ "${RESTIC_ONE_FILE_SYSTEM}" = "true" ]; then
+    set -- "$@" --one-file-system
+  fi
+
+  build_user_tag_list
+  if [ -n "${RESTIC_USER_TAG_LIST}" ]; then
+    oldIFS=$IFS
+    IFS=$NL
+    set -f
+    for tag in $RESTIC_USER_TAG_LIST; do
+      set -- "$@" --tag "$tag"
+    done
+    set +f
+    IFS=$oldIFS
+  fi
+  set -- "$@" --tag "db:${MYSQL_DATABASE}"
+
+  if [ -n "${RESTIC_EXTRA_ARGS:-}" ]; then
+    set -f
+    # shellcheck disable=SC2086
+    set -- "$@" ${RESTIC_EXTRA_ARGS}
+    set +f
+  else
+    set -- "$@" --no-cache
+  fi
+
+  set -- "$@" --
+  restic backup "$@"
+}
+
+restic_backup_paths() {
+  # $@ are paths to back up
+  set -- -- "$@"
+
+  if [ -n "${RESTIC_EXTRA_ARGS:-}" ]; then
+    set -f
+    # shellcheck disable=SC2086
+    set -- ${RESTIC_EXTRA_ARGS} "$@"
+    set +f
+  else
+    set -- --no-cache "$@"
+  fi
+
+  build_user_tag_list
+  if [ -n "${RESTIC_USER_TAG_LIST}" ]; then
+    oldIFS=$IFS
+    IFS=$NL
+    set -f
+    for tag in $RESTIC_USER_TAG_LIST; do
+      set -- --tag "$tag" "$@"
+    done
+    set +f
+    IFS=$oldIFS
+  fi
+  set -- --tag "db:${MYSQL_DATABASE}" "$@"
+
+  if [ "${RESTIC_ONE_FILE_SYSTEM}" = "true" ]; then
+    set -- --one-file-system "$@"
+  fi
+
+  set -- --host "${RESTIC_HOST}" "$@"
+  restic backup "$@"
+}
+
+restic_forget() {
+  set -- --host "${RESTIC_HOST}" --tag "db:${MYSQL_DATABASE}"
+  if [ -n "${RESTIC_FORGET_ARGS:-}" ]; then
+    set -f
+    # shellcheck disable=SC2086
+    set -- "$@" ${RESTIC_FORGET_ARGS}
+    set +f
+  else
+    set -- "$@" --prune --keep-last 7 --keep-daily 7 --keep-weekly 4 --keep-monthly 12 --group-by tags
+  fi
+
+  log "Retention: restic forget $*"
+  restic forget "$@"
+}
+
+mysqladmin_ping() {
+  set -- --protocol=tcp -h "${MYSQL_HOST}" -P "${MYSQL_PORT}" -u "${MYSQL_USER}"
+  if [ -n "${MYSQL_PLUGIN_ARG}" ]; then
+    set -- "$@" "${MYSQL_PLUGIN_ARG}"
+  fi
+  if [ -n "${MYSQL_CLIENT_EXTRA_ARGS}" ]; then
+    set -f
+    # shellcheck disable=SC2086
+    set -- "$@" ${MYSQL_CLIENT_EXTRA_ARGS}
+    set +f
+  fi
+
+  if [ -n "${MYSQL_PASSWORD_VALUE}" ]; then
+    MYSQL_PWD="${MYSQL_PASSWORD_VALUE}" mysqladmin "$@" ping --silent >/dev/null 2>&1
+  else
+    mysqladmin "$@" ping --silent >/dev/null 2>&1
+  fi
+}
+
+run_mysqldump() {
+  set -- --protocol=tcp -h "${MYSQL_HOST}" -P "${MYSQL_PORT}" -u "${MYSQL_USER}"
+  if [ -n "${MYSQL_PLUGIN_ARG}" ]; then
+    set -- "$@" "${MYSQL_PLUGIN_ARG}"
+  fi
+  if [ -n "${MYSQL_CLIENT_EXTRA_ARGS}" ]; then
+    set -f
+    # shellcheck disable=SC2086
+    set -- "$@" ${MYSQL_CLIENT_EXTRA_ARGS}
+    set +f
+  fi
+  if [ -n "${MYSQLDUMP_ARGS:-}" ]; then
+    set -f
+    # shellcheck disable=SC2086
+    set -- "$@" ${MYSQLDUMP_ARGS}
+    set +f
+  else
+    set -- "$@" --single-transaction --quick --routines --events --triggers --no-tablespaces
+  fi
+
+  if [ -n "${MYSQL_PASSWORD_VALUE}" ]; then
+    MYSQL_PWD="${MYSQL_PASSWORD_VALUE}" "${MYSQLDUMP_BIN}" "$@" --databases "${MYSQL_DATABASE}"
+  else
+    "${MYSQLDUMP_BIN}" "$@" --databases "${MYSQL_DATABASE}"
+  fi
+}
 
 # Wait for MySQL
 WAIT_SECONDS="${MYSQL_WAIT_SECONDS:-60}"
 SLEEP_SECONDS="${MYSQL_WAIT_INTERVAL_SECONDS:-5}"
+is_positive_int "${WAIT_SECONDS}" || die "MYSQL_WAIT_SECONDS must be a positive integer"
+is_positive_int "${SLEEP_SECONDS}" || die "MYSQL_WAIT_INTERVAL_SECONDS must be a positive integer"
 tries=$(( (WAIT_SECONDS + SLEEP_SECONDS - 1) / SLEEP_SECONDS ))
 
 log "Waiting for MySQL at ${MYSQL_HOST}:${MYSQL_PORT} (max ${WAIT_SECONDS}s)..."
 i=0
 while :; do
   i=$((i + 1))
-  if mysqladmin ${MYSQL_COMMON_ARGS} ping --silent >/dev/null 2>&1; then
+  if mysqladmin_ping; then
     log "MySQL is ready"
     break
   fi
@@ -156,18 +325,19 @@ while :; do
   sleep "${SLEEP_SECONDS}"
 done
 
-# Dump binary (mariadb-dump is preferred in this image)
-MYSQLDUMP_BIN="${MYSQLDUMP_BIN:-/usr/bin/mariadb-dump}"
-if [ ! -x "${MYSQLDUMP_BIN}" ]; then
-  MYSQLDUMP_BIN="/usr/bin/mysqldump"
+# Dump binary (mariadb-dump or mysqldump)
+MYSQLDUMP_BIN="${MYSQLDUMP_BIN:-}"
+if [ -z "${MYSQLDUMP_BIN}" ]; then
+  MYSQLDUMP_BIN="$(command -v mariadb-dump 2>/dev/null || true)"
+  if [ -z "${MYSQLDUMP_BIN}" ]; then
+    MYSQLDUMP_BIN="$(command -v mysqldump 2>/dev/null || true)"
+  fi
 fi
-[ -x "${MYSQLDUMP_BIN}" ] || die "mysqldump binary not found at ${MYSQLDUMP_BIN}"
+[ -n "${MYSQLDUMP_BIN}" ] && [ -x "${MYSQLDUMP_BIN}" ] || die "mysqldump binary not found (set MYSQLDUMP_BIN to an absolute path)"
 
 # Safe defaults for logical backups; override if needed
 # --no-tablespaces avoids PROCESS privilege requirement in MySQL 8 / MariaDB.
-MYSQLDUMP_ARGS="${MYSQLDUMP_ARGS:-"--single-transaction --quick --routines --events --triggers --no-tablespaces"}"
-
-RESTIC_EXTRA_ARGS="${RESTIC_EXTRA_ARGS:-"--no-cache"}"
+MYSQLDUMP_ARGS="${MYSQLDUMP_ARGS:-}"
 
 # Init repo if needed
 if [ "${SKIP_INIT:-false}" != "true" ]; then
@@ -179,53 +349,31 @@ if [ "${SKIP_INIT:-false}" != "true" ]; then
   fi
 fi
 
-TAG_ARGS=""
-if [ -n "${RESTIC_TAGS:-}" ]; then
-  oldIFS="$IFS"
-  IFS=','
-  for t in ${RESTIC_TAGS}; do
-    tt="$(echo "$t" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-    [ -n "$tt" ] && TAG_ARGS="${TAG_ARGS} --tag ${tt}"
-  done
-  IFS="$oldIFS"
-fi
-TAG_ARGS="${TAG_ARGS} --tag db:${MYSQL_DATABASE}"
-
 file_env BACKUP_PATHS true
-RESTIC_HOST="${RESTIC_HOSTNAME:-$(hostname)}"
+RESTIC_HOST="${RESTIC_HOST:-${RESTIC_HOSTNAME:-${HOSTNAME:-}}}"
+if [ -z "${RESTIC_HOST}" ]; then
+  if command -v hostname >/dev/null 2>&1; then
+    RESTIC_HOST="$(hostname 2>/dev/null || true)"
+  fi
+fi
+[ -n "${RESTIC_HOST}" ] || die "RESTIC_HOSTNAME, RESTIC_HOST, or HOSTNAME is required (unable to determine host)"
 BACKUP_PATHS="${BACKUP_PATHS:-}"
 RESTIC_ONE_FILE_SYSTEM="${RESTIC_ONE_FILE_SYSTEM:-false}"
-
-ONE_FS_ARGS=""
-if [ "${RESTIC_ONE_FILE_SYSTEM}" = "true" ]; then
-  ONE_FS_ARGS="--one-file-system"
-fi
 
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 DUMP_NAME="${MYSQL_DATABASE}-${STAMP}.sql.gz"
 
 log "Streaming database '${MYSQL_DATABASE}' to restic..."
-fifo="${TMPDIR}/mysqldump-${$}.fifo"
+fifo="${TMPDIR}/mysqldump-$$.fifo"
 cleanup_fifo() { rm -f "${fifo}" >/dev/null 2>&1 || true; }
 cleanup_fifo
 mkfifo "${fifo}" || die "mkfifo failed in ${TMPDIR}"
 trap 'cleanup_fifo' EXIT INT TERM
 
-# shellcheck disable=SC2086
-${MYSQLDUMP_BIN} ${MYSQL_COMMON_ARGS} ${MYSQLDUMP_ARGS} \
-  --databases "${MYSQL_DATABASE}" \
-  >"${fifo}" &
+run_mysqldump >"${fifo}" &
 dump_pid=$!
 
-gzip -n -9 < "${fifo}" | restic backup \
-  --stdin \
-  --stdin-filename "${DUMP_NAME}" \
-  --host "${RESTIC_HOST}" \
-  ${ONE_FS_ARGS} \
-  ${TAG_ARGS} \
-  ${RESTIC_EXTRA_ARGS} \
-  -- \
-  || restic_status=$?
+gzip -n -9 < "${fifo}" | restic_backup_stdin || restic_status=$?
 restic_status="${restic_status:-0}"
 
 if wait "${dump_pid}"; then
@@ -233,7 +381,6 @@ if wait "${dump_pid}"; then
 else
   dump_status=$?
 fi
-
 cleanup_fifo
 trap - EXIT INT TERM
 
@@ -243,36 +390,28 @@ trap - EXIT INT TERM
 set --
 if [ -n "${BACKUP_PATHS}" ]; then
   BACKUP_PATHS_NORMALIZED="$(printf '%s' "${BACKUP_PATHS}" | tr ',' '\n')"
-  oldIFS="$IFS"
-  IFS='
-'
-  for p in ${BACKUP_PATHS_NORMALIZED}; do
-    pp="$(echo "$p" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  oldIFS=$IFS
+  IFS=$NL
+  set -f
+  for p in $BACKUP_PATHS_NORMALIZED; do
+    pp="$(printf '%s\n' "$p" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
     [ -n "$pp" ] || continue
     [ -e "$pp" ] || die "Backup path missing: $pp"
     set -- "$@" "$pp"
   done
-  IFS="$oldIFS"
+  set +f
+  IFS=$oldIFS
 fi
 
 if [ "$#" -gt 0 ]; then
   log "Running restic backup for paths (host=${RESTIC_HOST})..."
-  # shellcheck disable=SC2086
-  restic backup \
-    --host "${RESTIC_HOST}" \
-    ${ONE_FS_ARGS} \
-    ${TAG_ARGS} \
-    ${RESTIC_EXTRA_ARGS} \
-    -- "$@"
+  restic_backup_paths "$@"
 else
   log "No extra backup paths configured."
 fi
 
 if [ "${SKIP_FORGET:-false}" != "true" ]; then
-  RESTIC_FORGET_ARGS="${RESTIC_FORGET_ARGS:-"--prune --keep-last 7 --keep-daily 7 --keep-weekly 4 --keep-monthly 12 --group-by tags"}"
-  log "Retention: restic forget ${RESTIC_FORGET_ARGS}"
-  # shellcheck disable=SC2086
-  restic forget ${RESTIC_FORGET_ARGS}
+  restic_forget
 fi
 
 if [ "${SKIP_CHECK:-false}" != "true" ] && [ -n "${RESTIC_CHECK_READ_DATA_SUBSET:-}" ]; then

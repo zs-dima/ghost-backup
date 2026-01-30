@@ -1,3 +1,5 @@
+version: "3.8"
+
 services:
   swarm-cronjob:
     image: ${SWARM_CRONJOB_IMAGE:-crazymax/swarm-cronjob:1.15.0}
@@ -17,20 +19,20 @@ services:
           - node.role == manager
 
   mysql-backup:
-    image: ${BACKUP_IMAGE:-backup-mysql:1.0.0}
-    read_only: true
+    image: ${BACKUP_IMAGE:-backup-mysql:1.0.4}
     tmpfs:
-      - /tmp:rw,mode=1777
-      - /backup-tmp:rw,mode=1777
+      - /tmp:mode=1777,uid=10001,gid=10001,size=256m
     environment:
       - TZ=${TZ:-UTC}
-      - TMPDIR=${TMPDIR:-/backup-tmp}
-      - RESTIC_REPOSITORY=${RESTIC_REPOSITORY}
+      - TMPDIR=${TMPDIR:-/tmp}
+      - RESTIC_REPOSITORY=${RESTIC_REPOSITORY:?RESTIC_REPOSITORY is required}
+      - RESTIC_HOSTNAME=${RESTIC_HOSTNAME:-mysql-backup}
       - RESTIC_PASSWORD_FILE=/run/secrets/restic_password
-      - MYSQL_HOST=${MYSQL_HOST}
+      - MYSQL_HOST=${MYSQL_HOST:?MYSQL_HOST is required}
       - MYSQL_PORT=${MYSQL_PORT:-3306}
-      - MYSQL_USER=${MYSQL_USER}
-      - MYSQL_DATABASE=${MYSQL_DATABASE}
+      - MYSQL_USER=${MYSQL_USER:?MYSQL_USER is required}
+      - MYSQL_DATABASE=${MYSQL_DATABASE:?MYSQL_DATABASE is required}
+      - MYSQL_CLIENT_EXTRA_ARGS=--ssl=0
       - MYSQL_PASSWORD_FILE=/run/secrets/mysql_password
       - S3_ACCESS_KEY_FILE=${S3_ACCESS_KEY_FILE}
       - S3_SECRET_KEY_FILE=${S3_SECRET_KEY_FILE}
