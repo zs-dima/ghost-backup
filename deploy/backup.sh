@@ -1,10 +1,21 @@
 #!/bin/sh
 set -eu
-(set -o pipefail) 2>/dev/null && set -o pipefail || true
 
 umask 077
-log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"; }
+log() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 die() { log "ERROR: $*"; exit 1; }
+
+if (set -o pipefail) 2>/dev/null; then
+  set -o pipefail
+else
+  die "This script requires /bin/sh with pipefail support"
+fi
+
+require_cmd() {
+  cmd="$1"
+  command -v "$cmd" >/dev/null 2>&1 || die "Required command not found: $cmd"
+}
+
 SCRIPT_VERSION="2026-01-29.4"
 log "backup.sh version ${SCRIPT_VERSION}"
 
@@ -16,22 +27,38 @@ file_env() {
   file=""
 
   case "$var" in
-    RESTIC_PASSWORD) val="${RESTIC_PASSWORD:-}" ;;
-    S3_ACCESS_KEY) val="${S3_ACCESS_KEY:-}" ;;
-    S3_SECRET_KEY) val="${S3_SECRET_KEY:-}" ;;
-    S3_SESSION_TOKEN) val="${S3_SESSION_TOKEN:-}" ;;
-    MYSQL_PASSWORD) val="${MYSQL_PASSWORD:-}" ;;
-    BACKUP_PATHS) val="${BACKUP_PATHS:-}" ;;
+    RESTIC_PASSWORD)
+      val="${RESTIC_PASSWORD:-}"
+      file="${RESTIC_PASSWORD_FILE:-}"
+      ;;
+    S3_ACCESS_KEY)
+      val="${S3_ACCESS_KEY:-}"
+      file="${S3_ACCESS_KEY_FILE:-}"
+      ;;
+    S3_SECRET_KEY)
+      val="${S3_SECRET_KEY:-}"
+      file="${S3_SECRET_KEY_FILE:-}"
+      ;;
+    S3_SESSION_TOKEN)
+      val="${S3_SESSION_TOKEN:-}"
+      file="${S3_SESSION_TOKEN_FILE:-}"
+      ;;
+    MYSQL_PASSWORD)
+      val="${MYSQL_PASSWORD:-}"
+      file="${MYSQL_PASSWORD_FILE:-}"
+      ;;
+    BACKUP_PATHS)
+      val="${BACKUP_PATHS:-}"
+      file="${BACKUP_PATHS_FILE:-}"
+      ;;
+    *)
+      die "file_env: unsupported variable '${var}'"
+      ;;
   esac
 
-  case "$file_var" in
-    RESTIC_PASSWORD_FILE) file="${RESTIC_PASSWORD_FILE:-}" ;;
-    S3_ACCESS_KEY_FILE) file="${S3_ACCESS_KEY_FILE:-}" ;;
-    S3_SECRET_KEY_FILE) file="${S3_SECRET_KEY_FILE:-}" ;;
-    S3_SESSION_TOKEN_FILE) file="${S3_SESSION_TOKEN_FILE:-}" ;;
-    MYSQL_PASSWORD_FILE) file="${MYSQL_PASSWORD_FILE:-}" ;;
-    BACKUP_PATHS_FILE) file="${BACKUP_PATHS_FILE:-}" ;;
-  esac
+  if [ -n "${val}" ] && [ -n "${file}" ]; then
+    die "${var} and ${file_var} are both set (use only one)"
+  fi
 
   if [ -n "${file}" ]; then
     [ -f "$file" ] || die "$file_var points to missing file: $file"
@@ -89,10 +116,28 @@ if [ -n "${MYSQL_PASSWORD:-}" ]; then
 fi
 
 # Plugin dir for MySQL 8 default auth (caching_sha2_password)
-MYSQL_PLUGIN_DIR="${MYSQL_PLUGIN_DIR:-/usr/lib/mariadb/plugin}"
+if [ -z "${MYSQL_PLUGIN_DIR+x}" ]; then
+  MYSQL_PLUGIN_DIR="/usr/lib/mariadb/plugin"
+fi
+MYSQL_PLUGIN_ARG=""
+if [ -n "${MYSQL_PLUGIN_DIR}" ]; then
+  if [ -d "${MYSQL_PLUGIN_DIR}" ]; then
+    MYSQL_PLUGIN_ARG="--plugin-dir=${MYSQL_PLUGIN_DIR}"
+  else
+    log "WARN: MySQL plugin dir '${MYSQL_PLUGIN_DIR}' not found; skipping --plugin-dir"
+  fi
+fi
 MYSQL_CLIENT_EXTRA_ARGS="${MYSQL_CLIENT_EXTRA_ARGS:-}"
 
-MYSQL_COMMON_ARGS="--protocol=tcp -h ${MYSQL_HOST} -P ${MYSQL_PORT} -u ${MYSQL_USER} --plugin-dir=${MYSQL_PLUGIN_DIR} ${MYSQL_CLIENT_EXTRA_ARGS}"
+MYSQL_COMMON_ARGS="--protocol=tcp -h ${MYSQL_HOST} -P ${MYSQL_PORT} -u ${MYSQL_USER} ${MYSQL_PLUGIN_ARG} ${MYSQL_CLIENT_EXTRA_ARGS}"
+
+require_cmd restic
+require_cmd mysqladmin
+require_cmd gzip
+require_cmd mkfifo
+if [ -z "${RESTIC_HOSTNAME:-}" ]; then
+  require_cmd hostname
+fi
 
 # Wait for MySQL
 WAIT_SECONDS="${MYSQL_WAIT_SECONDS:-60}"
@@ -116,6 +161,7 @@ MYSQLDUMP_BIN="${MYSQLDUMP_BIN:-/usr/bin/mariadb-dump}"
 if [ ! -x "${MYSQLDUMP_BIN}" ]; then
   MYSQLDUMP_BIN="/usr/bin/mysqldump"
 fi
+[ -x "${MYSQLDUMP_BIN}" ] || die "mysqldump binary not found at ${MYSQLDUMP_BIN}"
 
 # Safe defaults for logical backups; override if needed
 # --no-tablespaces avoids PROCESS privilege requirement in MySQL 8 / MariaDB.
@@ -182,8 +228,11 @@ gzip -n -9 < "${fifo}" | restic backup \
   || restic_status=$?
 restic_status="${restic_status:-0}"
 
-wait "${dump_pid}"
-dump_status=$?
+if wait "${dump_pid}"; then
+  dump_status=0
+else
+  dump_status=$?
+fi
 
 cleanup_fifo
 trap - EXIT INT TERM
