@@ -125,12 +125,26 @@ jobs:
           set -euo pipefail
           suffix="-${{ matrix.arch }}-staging-${GITHUB_RUN_ID}"
           tags="${{ needs.prepare.outputs.tags }}"
+          images="${{ needs.prepare.outputs.images }}"
+          has_tag="false"
+          while IFS= read -r tag; do
+            [ -z "$tag" ] && continue
+            has_tag="true"
+            break
+          done <<< "$tags"
           {
             echo "tags<<EOF"
-            while IFS= read -r tag; do
-              [ -z "$tag" ] && continue
-              echo "${tag}${suffix}"
-            done <<< "$tags"
+            if [ "$has_tag" = "true" ]; then
+              while IFS= read -r tag; do
+                [ -z "$tag" ] && continue
+                echo "${tag}${suffix}"
+              done <<< "$tags"
+            else
+              while IFS= read -r image; do
+                [ -z "$image" ] && continue
+                echo "${image}:sha-${GITHUB_SHA}${suffix}"
+              done <<< "$images"
+            fi
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 

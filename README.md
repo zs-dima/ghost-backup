@@ -57,3 +57,35 @@ Use `*_FILE` for secrets. Supported: `RESTIC_PASSWORD`, `MYSQL_PASSWORD`, `S3_AC
 | `SKIP_CHECK` | no | `false` | Skip `restic check`. |
 | `S3_ACCESS_KEY` / `S3_SECRET_KEY` | no | — | S3 access key pair (both required if either set). |
 | `S3_SESSION_TOKEN` | no | — | Optional session token. |
+
+## Restore
+
+Set the same repo credentials you use for backups (`RESTIC_REPOSITORY`, `RESTIC_PASSWORD`, plus any S3/AWS env your repo needs).
+
+Database (dump file is named `<db>-<UTC timestamp>.sql.gz`):
+
+```bash
+docker run --rm \
+  -e RESTIC_REPOSITORY='s3:https://HOST/BUCKET/PREFIX' \
+  -e RESTIC_PASSWORD='<restic-password>' \
+  --entrypoint /usr/local/bin/restic \
+  backup-mysql:local snapshots --tag "db:<db>"
+
+docker run --rm \
+  -e RESTIC_REPOSITORY='s3:https://HOST/BUCKET/PREFIX' \
+  -e RESTIC_PASSWORD='<restic-password>' \
+  --entrypoint /usr/local/bin/restic \
+  backup-mysql:local dump <snapshot-id> '<db>-<timestamp>.sql.gz' > dump.sql.gz
+
+gunzip -c dump.sql.gz | mysql -h <mysql-host> -u <mysql-user> -p <db>
+```
+
+Files:
+
+```bash
+docker run --rm \
+  -e RESTIC_REPOSITORY='s3:https://HOST/BUCKET/PREFIX' \
+  -e RESTIC_PASSWORD='<restic-password>' \
+  --entrypoint /usr/local/bin/restic \
+  backup-mysql:local restore <snapshot-id> --target /restore --include /path/in/backup
+```
