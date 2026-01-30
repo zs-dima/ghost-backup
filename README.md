@@ -2,8 +2,6 @@
 
 Containerized, one-shot backup job that runs `mysqldump`, streams it through gzip to restic, optionally backs up extra paths, then exits.
 
-Docker Hub: zsdima/ghost-backup:latest
-
 ## Run (Docker)
 
 ```bash
